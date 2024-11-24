@@ -10,7 +10,10 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
+<<<<<<< HEAD
     "@pulumi/aws": "^6.57.0",
+=======
+>>>>>>> 519aa655ccb266b772150d6a15b85e403235eb08
     "cors": "^2.8.5",
     "express": "^4.17.2"
   }
