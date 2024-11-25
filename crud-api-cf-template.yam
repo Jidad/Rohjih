@@ -1,0 +1,369 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Metadata:
+    Generator: "former2"
+Description: ""
+Resources:
+    S3Bucket:
+        Type: AWS::S3::Bucket
+    IAMRole:
+        Type: "AWS::IAM::Role"
+        Properties:
+            Path: "/"
+            RoleName: !Sub "AllowAPIGatewayCRUDOperationsOnTodoTableRole-${AWS::Region}"
+            AssumeRolePolicyDocument: "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"apigateway.amazonaws.com\"},\"Action\":\"sts:AssumeRole\"}]}"
+            MaxSessionDuration: 3600
+            ManagedPolicyArns: 
+              - !Ref IAMManagedPolicy
+              - "arn:aws:iam::aws:policy/service-role/AmazonAPIGatewayPushToCloudWatchLogs"
+            Description: "Allows API Gateway to push logs to CloudWatch Logs."
+
+    IAMManagedPolicy:
+        Type: "AWS::IAM::ManagedPolicy"
+        Properties:
+            ManagedPolicyName: !Sub "AllowAPIGatewayCRUDOperationsOnTodoTablePolicy-${AWS::Region}"
+            Path: "/"
+            PolicyDocument: !Sub |
+                {
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Sid": "DynamoDBIndexAndStreamAccess",
+                            "Effect": "Allow",
+                            "Action": [
+                                "dynamodb:GetShardIterator",
+                                "dynamodb:Scan",
+                                "dynamodb:Query",
+                                "dynamodb:DescribeStream",
+                                "dynamodb:GetRecords",
+                                "dynamodb:ListStreams"
+                            ],
+                            "Resource": [
+                                "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}/index/*",
+                                "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}/stream/*"
+                            ]
+                        },
+                        {
+                            "Sid": "DynamoDBTableAccess",
+                            "Effect": "Allow",
+                            "Action": [
+                                "dynamodb:BatchGetItem",
+                                "dynamodb:BatchWriteItem",
+                                "dynamodb:ConditionCheckItem",
+                                "dynamodb:PutItem",
+                                "dynamodb:DescribeTable",
+                                "dynamodb:DeleteItem",
+                                "dynamodb:GetItem",
+                                "dynamodb:Scan",
+                                "dynamodb:Query",
+                                "dynamodb:UpdateItem"
+                            ],
+                            "Resource": "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}"
+                        },
+                        {
+                            "Sid": "DynamoDBDescribeLimitsAccess",
+                            "Effect": "Allow",
+                            "Action": "dynamodb:DescribeLimits",
+                            "Resource": [
+                                "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}",
+                                "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}/index/*"
+                            ]
+                        }
+                    ]
+                }
+
+    DynamoDBTable:
+        Type: "AWS::DynamoDB::Table"
+        Properties:
+            AttributeDefinitions: 
+              - 
+                AttributeName: "id"
+                AttributeType: "S"
+            BillingMode: "PAY_PER_REQUEST"
+            TableName: "todo-table"
+            KeySchema: 
+              - 
+                AttributeName: "id"
+                KeyType: "HASH"
+
+    ApiGatewayRestApi:
+        Type: "AWS::ApiGateway::RestApi"
+        Properties:
+            Name: "todo-api"
+            ApiKeySourceType: "HEADER"
+            EndpointConfiguration: 
+                Types: 
+                  - "REGIONAL"
+
+    ApiGatewayResource:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "{id}"
+            ParentId: !Ref ApiGatewayResource2
+
+    ApiGatewayResource2:
+        Type: "AWS::ApiGateway::Resource"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            PathPart: "todos"
+            ParentId: !GetAtt ApiGatewayRestApi.RootResourceId
+
+    ApiGatewayMethod:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "GET"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.querystring.completed": false
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": !Sub "Empty${ApiGatewayModel}"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                Credentials: !GetAtt IAMRole.Arn
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: 
+                        "application/json": |
+                            #set($inputRoot = $input.path('$'))
+                            {
+                                "todos": [
+                                    #foreach($elem in $inputRoot.Items) {
+                                        "id": "$elem.id.S",
+                                        "userId": "$elem.userId.N",
+                                        "title": "$elem.title.S",
+                                        "completed": "$elem.completed.BOOL"
+                                    }#if($foreach.hasNext),#end
+                            	#end
+                                ]
+                            }
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        { 
+                            "TableName": "${DynamoDBTable}"
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/Scan"
+
+    ApiGatewayMethod2:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource
+            HttpMethod: "GET"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": !Sub "Empty${ApiGatewayModel}"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource
+                Credentials: !GetAtt IAMRole.Arn
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    ResponseTemplates: 
+                        "application/json": |
+                            {
+                                "id": "$input.path('$.Item.id.S')",
+                                "userId": "$input.path('$.Item.userId.N')",
+                                "title": "$input.path('$.Item.title.S')",
+                                "completed": "$input.path('$.Item.completed.BOOL')"
+                            }
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        {
+                            "TableName": "${DynamoDBTable}",
+                            "Key": {
+                                "id": {
+                                    "S": "$method.request.path.id"
+                                }
+                            }
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/GetItem"
+
+    ApiGatewayMethod3:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource
+            HttpMethod: "DELETE"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": !Sub "Empty${ApiGatewayModel}"
+                StatusCode: "200"
+              - 
+                StatusCode: "204"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource
+                Credentials: !GetAtt IAMRole.Arn
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        {
+                            "TableName": "${DynamoDBTable}",
+                            "Key": {
+                                "id": {
+                                    "S": "$method.request.path.id"
+                                }
+                            }
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/DeleteItem"
+
+    ApiGatewayMethod4:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource
+            HttpMethod: "PUT"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestParameters: 
+                "method.request.path.id": true
+            RequestModels: 
+                "application/json": !Ref ApiGatewayModel
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": !Sub "Empty${ApiGatewayModel}"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource
+                Credentials: !GetAtt IAMRole.Arn
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        { 
+                            "TableName": "${DynamoDBTable}",
+                            "Item": {
+                            	"id": {
+                                        "S": "$method.request.path.id"
+                                    },
+                                "userId": {
+                                        "N": "$input.path('$.userId')"
+                                    },
+                                "title": {
+                                        "S": "$input.path('$.title')"
+                                    },
+                                "completed": {
+                                        "BOOL": "$input.path('$.completed')"            
+                                    }
+                            }
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/PutItem"
+
+    ApiGatewayMethod5:
+        Type: "AWS::ApiGateway::Method"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            ResourceId: !Ref ApiGatewayResource2
+            HttpMethod: "POST"
+            AuthorizationType: "NONE"
+            ApiKeyRequired: false
+            RequestModels: 
+                "application/json": !Ref ApiGatewayModel
+            MethodResponses: 
+              - 
+                ResponseModels: 
+                    "application/json": !Sub "Empty${ApiGatewayModel}"
+                StatusCode: "200"
+            Integration: 
+                CacheNamespace: !Ref ApiGatewayResource2
+                Credentials: !GetAtt IAMRole.Arn
+                IntegrationHttpMethod: "POST"
+                IntegrationResponses: 
+                  - 
+                    StatusCode: "200"
+                PassthroughBehavior: "WHEN_NO_TEMPLATES"
+                RequestTemplates: 
+                    "application/json": !Sub |
+                        { 
+                            "TableName": "${DynamoDBTable}",
+                            "Item": {
+                            	"id": {
+                                        "S": "$context.requestId"
+                                    },
+                                "userId": {
+                                        "N": "$input.path('$.userId')"
+                                    },
+                                "title": {
+                                        "S": "$input.path('$.title')"
+                                    },
+                                "completed": {
+                                        "BOOL": "$input.path('$.completed')"            
+                                    }
+                            }
+                        }
+                TimeoutInMillis: 29000
+                Type: "AWS"
+                Uri: !Sub "arn:aws:apigateway:${AWS::Region}:dynamodb:action/PutItem"
+
+    ApiGatewayModel:
+        Type: "AWS::ApiGateway::Model"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            Name: "TodoSchema"
+            Schema: |
+                {
+                  "required" : [ "completed", "title", "userId" ],
+                  "type" : "object",
+                  "properties" : {
+                    "userId" : {
+                      "type" : "integer",
+                      "format" : "int32"
+                    },
+                    "title" : {
+                      "type" : "string"
+                    },
+                    "completed" : {
+                      "type" : "boolean"
+                    }
+                  }
+                }
+            ContentType: "application/json"
+
+    ApiGatewayModel2:
+        Type: "AWS::ApiGateway::Model"
+        Properties:
+            RestApiId: !Ref ApiGatewayRestApi
+            Name: !Sub "Empty${ApiGatewayModel}"
+            Schema: |
+                {
+                  "title" : "Empty Schema",
+                  "type" : "object"
+                }
+            ContentType: "application/json"
